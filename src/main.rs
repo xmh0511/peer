@@ -294,10 +294,13 @@ async fn main() {
     loop {
         tokio::select! {
             pkt = framed.next() =>{
+				//let time = chrono::Local::now().timestamp_millis();
+				//println!("read packet from tun     {time}");
                 parse_tun_packet(pkt,& mut framed, & mut stream).await;
             }
             size = read_data_len(& mut stream) =>{
-                //println!("read packet from network");
+				//let time = chrono::Local::now().timestamp_millis();
+                //println!("read packet from network {time}");
                 match size{
                     Some(size)=>{
                         match read_body(size,& mut stream).await{
