@@ -1,10 +1,9 @@
 use std::{
     fmt::Debug,
     net::{IpAddr, SocketAddr},
-    os::macos::raw,
 };
 
-use futures::{Sink, SinkExt, StreamExt};
+use futures::{ SinkExt, StreamExt};
 use packet::{builder::Builder, icmp, ip, Packet};
 use std::io::Error;
 use std::net::Ipv4Addr;
@@ -12,8 +11,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
-use tokio_util::codec::{Encoder, Framed};
-use tun::{AsyncDevice, Configuration, TunPacket, TunPacketCodec};
+use tun::{Configuration, TunPacket};
 
 const CURRENT_IP: [u8; 4] = [10, 0, 0, 2];
 
@@ -24,7 +22,7 @@ async fn write_packet_to_socket(packet: TunPacket, stream: &mut TcpStream) {
     let mut write_buffer = Vec::new();
     write_buffer.extend_from_slice(&bytes);
     write_buffer.extend_from_slice(buff);
-    stream.write(&write_buffer).await.unwrap();
+    stream.write_all(&write_buffer).await.unwrap();
 }
 async fn parse_tun_packet<F>(
     packet: Option<Result<TunPacket, Error>>,
