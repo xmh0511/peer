@@ -4,7 +4,7 @@ use std::{
 };
 
 use futures::{SinkExt, StreamExt};
-use packet::{builder::Builder, icmp, ip, Packet};
+use packet::{builder::Builder, icmp, ip, ip::Protocol, Packet};
 use std::io::Error;
 use std::net::Ipv4Addr;
 use tokio::{
@@ -38,13 +38,103 @@ async fn parse_tun_packet<F>(
                 Ok(ip::Packet::V4(pkt)) => {
                     //println!("");
                     // IP V4 packet
-                    match icmp::Packet::new(pkt.payload()) {
-                        Ok(icmp) => {
-                            // packet is icmp echo
-                            match icmp.echo() {
-                                Ok(icmp) => {
-                                    if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
-                                        //target myself
+                    if pkt.protocol() == Protocol::Icmp {
+                        match icmp::Packet::new(pkt.payload()) {
+                            Ok(icmp) => {
+                                // packet is icmp echo
+                                match icmp.echo() {
+                                    Ok(icmp) => {
+                                        if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
+                                            //target myself
+                                            let reply = ip::v4::Builder::default()
+                                                .id(0x42)
+                                                .unwrap()
+                                                .ttl(64)
+                                                .unwrap()
+                                                .source(pkt.destination())
+                                                .unwrap()
+                                                .destination(pkt.source())
+                                                .unwrap()
+                                                .icmp()
+                                                .unwrap()
+                                                .echo()
+                                                .unwrap()
+                                                .reply()
+                                                .unwrap()
+                                                .identifier(icmp.identifier())
+                                                .unwrap()
+                                                .sequence(icmp.sequence())
+                                                .unwrap()
+                                                .payload(icmp.payload())
+                                                .unwrap()
+                                                .build()
+                                                .unwrap();
+                                            //tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                            //framed.next().await;
+                                            //println!("reply to {}",icmp.sequence());
+                                            framed.send(TunPacket::new(reply)).await.unwrap();
+                                        } else {
+                                            write_packet_to_socket(
+                                                TunPacket::new(raw_pkt.get_bytes().to_owned()),
+                                                stream,
+                                            )
+                                            .await;
+                                        }
+                                        return;
+                                    }
+                                    _ => {
+                                        // println!("icmp packet from tun but not echo");
+                                        // write_packet_to_socket(raw_pkt, stream).await;
+                                        // return;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        // maybe TCP, UDP or other packets
+                        if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
+                            //target myself
+                            framed.send(raw_pkt).await.unwrap();
+                        } else {
+                            write_packet_to_socket(raw_pkt, stream).await;
+                        }
+                    }
+                }
+                Err(err) => {
+                    println!("Received an invalid packet: {:?}", err);
+                }
+                _ => {
+                    println!("non-ip-v4 packet!!!!!");
+                }
+            },
+            Err(err) => {
+                println!("Error: {:?}", err);
+            }
+        },
+        None => {}
+    }
+}
+
+async fn parse_socket_packet<F>(raw_pkt: TunPacket, framed: &mut F, stream: &mut TcpStream)
+where
+    F: SinkExt<TunPacket> + Unpin,
+    F::Error: Debug,
+{
+    match ip::Packet::new(raw_pkt.get_bytes()) {
+        Ok(ip::Packet::V4(pkt)) => {
+            //println!("ip v4 packet from socket");
+            // IP V4 packet
+            if pkt.protocol() == Protocol::Icmp {
+                match icmp::Packet::new(pkt.payload()) {
+                    Ok(icmp) => {
+                        // packet is icmp echo
+                        //println!("icmp packet from socket!!!!!");
+                        match icmp.echo() {
+                            Ok(icmp) => {
+                                if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
+                                    //target myself
+                                    if icmp.is_request() {
                                         let reply = ip::v4::Builder::default()
                                             .id(0x42)
                                             .unwrap()
@@ -68,126 +158,46 @@ async fn parse_tun_packet<F>(
                                             .unwrap()
                                             .build()
                                             .unwrap();
-                                        //tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                                        //framed.next().await;
-                                        //println!("reply to {}",icmp.sequence());
-                                        framed.send(TunPacket::new(reply)).await.unwrap();
-                                    } else {
-                                        write_packet_to_socket(
-                                            TunPacket::new(raw_pkt.get_bytes().to_owned()),
-                                            stream,
-                                        )
-                                        .await;
+                                        write_packet_to_socket(TunPacket::new(reply), stream).await;
+                                    } else if icmp.is_reply() {
+                                        framed
+                                            .send(TunPacket::new(raw_pkt.get_bytes().to_owned()))
+                                            .await
+                                            .unwrap();
                                     }
-                                    return;
                                 }
-                                _ => {
-									// println!("icmp packet from tun but not echo");
-									// write_packet_to_socket(raw_pkt, stream).await;
-									// return;
-								}
+                                return;
+                            }
+                            _ => {
+                                // println!("icmp packet but not icmp echo");
+                                // framed.send(raw_pkt).await.unwrap();
+                                // return;
                             }
                         }
-                        _ => {}
                     }
-                    // maybe TCP, UDP packet
-                    if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
-                        //target myself
-                        framed.send(raw_pkt).await.unwrap();
-                    } else {
-                        write_packet_to_socket(raw_pkt, stream).await;
-                    }
+                    _ => {}
                 }
-                Err(err) => {
-                    println!("Received an invalid packet: {:?}", err);
+            } else {
+                // maybe TCP, UDP packet or other packets
+                //println!("tcp packet from socket!!!!!");
+                if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
+                    //target myself
+                    framed.send(raw_pkt).await.unwrap();
                 }
-                _ => {}
-            },
-            Err(err) => {
-                println!("Error: {:?}", err);
-            }
-        },
-        None => {}
-    }
-}
-
-async fn parse_socket_packet<F>(raw_pkt: TunPacket, framed: &mut F, stream: &mut TcpStream)
-where
-    F: SinkExt<TunPacket> + Unpin,
-    F::Error: Debug,
-{
-    match ip::Packet::new(raw_pkt.get_bytes()) {
-        Ok(ip::Packet::V4(pkt)) => {
-            println!("ip v4 packet from socket");
-            // IP V4 packet
-            match icmp::Packet::new(pkt.payload()) {
-                Ok(icmp) => {
-                    // packet is icmp echo
-					println!("icmp packet from socket!!!!!");
-                    match icmp.echo() {
-                        Ok(icmp) => {
-                            if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
-                                //target myself
-                                if icmp.is_request() {
-                                    let reply = ip::v4::Builder::default()
-                                        .id(0x42)
-                                        .unwrap()
-                                        .ttl(64)
-                                        .unwrap()
-                                        .source(pkt.destination())
-                                        .unwrap()
-                                        .destination(pkt.source())
-                                        .unwrap()
-                                        .icmp()
-                                        .unwrap()
-                                        .echo()
-                                        .unwrap()
-                                        .reply()
-                                        .unwrap()
-                                        .identifier(icmp.identifier())
-                                        .unwrap()
-                                        .sequence(icmp.sequence())
-                                        .unwrap()
-                                        .payload(icmp.payload())
-                                        .unwrap()
-                                        .build()
-                                        .unwrap();
-                                    write_packet_to_socket(TunPacket::new(reply), stream).await;
-                                } else if icmp.is_reply() {
-                                    framed
-                                        .send(TunPacket::new(raw_pkt.get_bytes().to_owned()))
-                                        .await
-                                        .unwrap();
-                                }
-                            }
-                            return;
-                        }
-                        _ => {
-							// println!("icmp packet but not icmp echo");
-							// framed.send(raw_pkt).await.unwrap();
-                            // return;
-                        }
-                    }
-                }
-                _ => {}
-            }
-            // maybe TCP, UDP packet
-			println!("and tcp packet from socket!!!!!");
-            if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
-                //target myself
-                framed.send(raw_pkt).await.unwrap();
             }
         }
         Err(err) => {
             println!("Received an invalid packet: {:?}", err);
         }
-        _ => {}
+        _ => {
+            println!("non-ip-v4 packet!!!!!");
+        }
     };
 }
 
 #[tokio::main]
 async fn main() {
-    let rely_server = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3000);
+    let rely_server = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 11)), 3000);
     let mut config = Configuration::default();
 
     config
