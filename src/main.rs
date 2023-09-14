@@ -81,7 +81,11 @@ async fn parse_tun_packet<F>(
                                     }
                                     return;
                                 }
-                                _ => {}
+                                _ => {
+									// println!("icmp packet from tun but not echo");
+									// write_packet_to_socket(raw_pkt, stream).await;
+									// return;
+								}
                             }
                         }
                         _ => {}
@@ -114,11 +118,12 @@ where
 {
     match ip::Packet::new(raw_pkt.get_bytes()) {
         Ok(ip::Packet::V4(pkt)) => {
-            //println!("");
+            println!("ip v4 packet from socket");
             // IP V4 packet
             match icmp::Packet::new(pkt.payload()) {
                 Ok(icmp) => {
                     // packet is icmp echo
+					println!("icmp packet from socket!!!!!");
                     match icmp.echo() {
                         Ok(icmp) => {
                             if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
@@ -158,13 +163,16 @@ where
                             return;
                         }
                         _ => {
-                            return;
+							// println!("icmp packet but not icmp echo");
+							// framed.send(raw_pkt).await.unwrap();
+                            // return;
                         }
                     }
                 }
                 _ => {}
             }
             // maybe TCP, UDP packet
+			println!("and tcp packet from socket!!!!!");
             if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
                 //target myself
                 framed.send(raw_pkt).await.unwrap();
@@ -283,8 +291,8 @@ async fn main() {
                 parse_tun_packet(pkt,& mut framed, & mut stream).await;
             }
             size = read_data_len(& mut stream) =>{
-                //let time = chrono::Local::now().timestamp_millis();
-                //println!("read packet from network {time}");
+                // let time = chrono::Local::now().timestamp_millis();
+                // println!("read packet from network {time}");
                 match size{
                     Some(size)=>{
                         match read_body(size,& mut stream).await{
