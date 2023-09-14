@@ -3,7 +3,7 @@ use std::{
     net::{IpAddr, SocketAddr},
 };
 
-use futures::{ SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt};
 use packet::{builder::Builder, icmp, ip, Packet};
 use std::io::Error;
 use std::net::Ipv4Addr;
@@ -107,88 +107,74 @@ async fn parse_tun_packet<F>(
     }
 }
 
-async fn parse_socket_packet<F>(
-    packet: Option<Result<TunPacket, Error>>,
-    framed: &mut F,
-    stream: &mut TcpStream,
-) where
+async fn parse_socket_packet<F>(raw_pkt: TunPacket, framed: &mut F, stream: &mut TcpStream)
+where
     F: SinkExt<TunPacket> + Unpin,
     F::Error: Debug,
 {
-    match packet {
-        Some(packet) => match packet {
-            Ok(raw_pkt) => match ip::Packet::new(raw_pkt.get_bytes()) {
-                Ok(ip::Packet::V4(pkt)) => {
-                    //println!("");
-                    // IP V4 packet
-                    match icmp::Packet::new(pkt.payload()) {
+    match ip::Packet::new(raw_pkt.get_bytes()) {
+        Ok(ip::Packet::V4(pkt)) => {
+            //println!("");
+            // IP V4 packet
+            match icmp::Packet::new(pkt.payload()) {
+                Ok(icmp) => {
+                    // packet is icmp echo
+                    match icmp.echo() {
                         Ok(icmp) => {
-                            // packet is icmp echo
-                            match icmp.echo() {
-                                Ok(icmp) => {
-                                    if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
-                                        //target myself
-                                        if icmp.is_request() {
-                                            let reply = ip::v4::Builder::default()
-                                                .id(0x42)
-                                                .unwrap()
-                                                .ttl(64)
-                                                .unwrap()
-                                                .source(pkt.destination())
-                                                .unwrap()
-                                                .destination(pkt.source())
-                                                .unwrap()
-                                                .icmp()
-                                                .unwrap()
-                                                .echo()
-                                                .unwrap()
-                                                .reply()
-                                                .unwrap()
-                                                .identifier(icmp.identifier())
-                                                .unwrap()
-                                                .sequence(icmp.sequence())
-                                                .unwrap()
-                                                .payload(icmp.payload())
-                                                .unwrap()
-                                                .build()
-                                                .unwrap();
-                                            write_packet_to_socket(TunPacket::new(reply), stream)
-                                                .await;
-                                        } else if icmp.is_reply() {
-                                            framed
-                                                .send(TunPacket::new(
-                                                    raw_pkt.get_bytes().to_owned(),
-                                                ))
-                                                .await
-                                                .unwrap();
-                                        }
-                                    }
-                                    return;
-                                }
-                                _ => {
-                                    return;
+                            if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
+                                //target myself
+                                if icmp.is_request() {
+                                    let reply = ip::v4::Builder::default()
+                                        .id(0x42)
+                                        .unwrap()
+                                        .ttl(64)
+                                        .unwrap()
+                                        .source(pkt.destination())
+                                        .unwrap()
+                                        .destination(pkt.source())
+                                        .unwrap()
+                                        .icmp()
+                                        .unwrap()
+                                        .echo()
+                                        .unwrap()
+                                        .reply()
+                                        .unwrap()
+                                        .identifier(icmp.identifier())
+                                        .unwrap()
+                                        .sequence(icmp.sequence())
+                                        .unwrap()
+                                        .payload(icmp.payload())
+                                        .unwrap()
+                                        .build()
+                                        .unwrap();
+                                    write_packet_to_socket(TunPacket::new(reply), stream).await;
+                                } else if icmp.is_reply() {
+                                    framed
+                                        .send(TunPacket::new(raw_pkt.get_bytes().to_owned()))
+                                        .await
+                                        .unwrap();
                                 }
                             }
+                            return;
                         }
-                        _ => {}
+                        _ => {
+                            return;
+                        }
                     }
-                    // maybe TCP, UDP packet
-                    if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
-                        //target myself
-                        framed.send(raw_pkt).await.unwrap();
-                    }
-                }
-                Err(err) => {
-                    println!("Received an invalid packet: {:?}", err);
                 }
                 _ => {}
-            },
-            Err(err) => {
-                println!("Error: {:?}", err);
             }
-        },
-        None => {}
-    }
+            // maybe TCP, UDP packet
+            if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
+                //target myself
+                framed.send(raw_pkt).await.unwrap();
+            }
+        }
+        Err(err) => {
+            println!("Received an invalid packet: {:?}", err);
+        }
+        _ => {}
+    };
 }
 
 #[tokio::main]
@@ -292,20 +278,19 @@ async fn main() {
     loop {
         tokio::select! {
             pkt = framed.next() =>{
-				//let time = chrono::Local::now().timestamp_millis();
-				//println!("read packet from tun     {time}");
+                //let time = chrono::Local::now().timestamp_millis();
+                //println!("read packet from tun     {time}");
                 parse_tun_packet(pkt,& mut framed, & mut stream).await;
             }
             size = read_data_len(& mut stream) =>{
-				//let time = chrono::Local::now().timestamp_millis();
+                //let time = chrono::Local::now().timestamp_millis();
                 //println!("read packet from network {time}");
                 match size{
                     Some(size)=>{
                         match read_body(size,& mut stream).await{
                             Some(buf)=>{
-                                let packet = TunPacket::new(buf);
                                 //framed.send(packet).await.unwrap();
-                                parse_socket_packet(Some(Ok(packet)),& mut framed,& mut stream).await;
+                                parse_socket_packet(TunPacket::new(buf),& mut framed,& mut stream).await;
                             }
                             None=>{
                                 reconnect(& mut stream,rely_server.clone()).await;
