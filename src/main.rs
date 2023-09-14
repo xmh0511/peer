@@ -70,9 +70,9 @@ async fn parse_tun_packet<F>(
                                             .unwrap()
                                             .build()
                                             .unwrap();
-										//tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-										//framed.next().await;
-										//println!("reply to {}",icmp.sequence());
+                                        //tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                        //framed.next().await;
+                                        //println!("reply to {}",icmp.sequence());
                                         framed.send(TunPacket::new(reply)).await.unwrap();
                                     } else {
                                         write_packet_to_socket(
@@ -280,6 +280,7 @@ async fn main() {
     }
 
     async fn reconnect(stream: &mut TcpStream, rely_server: SocketAddr) {
+        println!("try to reconnect!!!!");
         match TcpStream::connect(rely_server.clone()).await {
             Ok(new_stream) => {
                 *stream = new_stream;
@@ -296,14 +297,14 @@ async fn main() {
                 parse_tun_packet(pkt,& mut framed, & mut stream).await;
             }
             size = read_data_len(& mut stream) =>{
-				//println!("read packet from network");
+                //println!("read packet from network");
                 match size{
                     Some(size)=>{
                         match read_body(size,& mut stream).await{
                             Some(buf)=>{
                                 let packet = TunPacket::new(buf);
                                 //framed.send(packet).await.unwrap();
-								parse_socket_packet(Some(Ok(packet)),& mut framed,& mut stream).await;
+                                parse_socket_packet(Some(Ok(packet)),& mut framed,& mut stream).await;
                             }
                             None=>{
                                 reconnect(& mut stream,rely_server.clone()).await;
