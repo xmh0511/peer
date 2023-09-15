@@ -1,8 +1,6 @@
-use std::{
-    fmt::Debug,
-    net::{IpAddr, SocketAddr},
-};
+use std::{fmt::Debug, net::SocketAddr};
 
+use config_file::FromConfigFile;
 use futures::{SinkExt, StreamExt};
 use packet::{builder::Builder, icmp, ip, ip::Protocol, Packet};
 use std::io::Error;
@@ -13,7 +11,6 @@ use tokio::{
 };
 use tun::{Configuration, TunPacket};
 
-const CURRENT_IP: [u8; 4] = [10, 0, 0, 2];
 
 async fn write_packet_to_socket(packet: TunPacket, stream: &mut TcpStream) {
     let buff = packet.get_bytes();
@@ -28,6 +25,7 @@ async fn parse_tun_packet<F>(
     packet: Option<Result<TunPacket, Error>>,
     framed: &mut F,
     stream: &mut TcpStream,
+    current_ip: Ipv4Addr,
 ) where
     F: SinkExt<TunPacket> + Unpin + StreamExt,
     F::Error: Debug,
@@ -44,7 +42,7 @@ async fn parse_tun_packet<F>(
                                 // packet is icmp echo
                                 match icmp.echo() {
                                     Ok(icmp) => {
-                                        if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
+                                        if pkt.destination() == current_ip {
                                             //target myself
                                             let reply = ip::v4::Builder::default()
                                                 .id(0x42)
@@ -93,7 +91,7 @@ async fn parse_tun_packet<F>(
                         }
                     } else {
                         // maybe TCP, UDP or other packets
-                        if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
+                        if pkt.destination() == current_ip {
                             //target myself
                             framed.send(raw_pkt).await.unwrap();
                         } else {
@@ -116,8 +114,12 @@ async fn parse_tun_packet<F>(
     }
 }
 
-async fn parse_socket_packet<F>(raw_pkt: TunPacket, framed: &mut F, stream: &mut TcpStream)
-where
+async fn parse_socket_packet<F>(
+    raw_pkt: TunPacket,
+    framed: &mut F,
+    stream: &mut TcpStream,
+    current_ip: Ipv4Addr,
+) where
     F: SinkExt<TunPacket> + Unpin,
     F::Error: Debug,
 {
@@ -132,7 +134,7 @@ where
                         //println!("icmp packet from socket!!!!!");
                         match icmp.echo() {
                             Ok(icmp) => {
-                                if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
+                                if pkt.destination() == current_ip {
                                     //target myself
                                     if icmp.is_request() {
                                         let reply = ip::v4::Builder::default()
@@ -180,7 +182,7 @@ where
             } else {
                 // maybe TCP, UDP packet or other packets
                 //println!("tcp packet from socket!!!!!");
-                if pkt.destination() == Ipv4Addr::from(CURRENT_IP) {
+                if pkt.destination() == current_ip {
                     //target myself
                     framed.send(raw_pkt).await.unwrap();
                 }
@@ -195,13 +197,27 @@ where
     };
 }
 
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Config {
+    rely: String,
+    vir_addr: String,
+    route: String,
+	try_times:i32
+}
+
 #[tokio::main]
 async fn main() {
-    let rely_server = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 11)), 3000);
+    let config_file = Config::from_config_file("./config.toml").unwrap();
+
+    let rely_server: SocketAddr = config_file.rely.parse().unwrap();
+    let current_vir_ip: Ipv4Addr = config_file.vir_addr.parse().unwrap();
+
     let mut config = Configuration::default();
 
     config
-        .address(Ipv4Addr::from(CURRENT_IP))
+        .address(current_vir_ip.clone())
         .netmask((255, 255, 255, 0))
         .up();
 
@@ -211,6 +227,24 @@ async fn main() {
     });
 
     let dev = tun::create_as_async(&config).unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    #[cfg(target_os = "macos")]
+    {
+        let s = format!(
+            "sudo route -n add -net {} {}",
+            config_file.route, config_file.vir_addr
+        );
+        let command = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(s)
+            .output()
+            .unwrap();
+        if !command.status.success() {
+            panic!("cannot establish route to tun device");
+        }
+    };
+
     let mut framed = dev.into_framed();
 
     let mut stream = match TcpStream::connect(rely_server.clone()).await {
@@ -281,16 +315,20 @@ async fn main() {
         }
     }
 
-    async fn reconnect(stream: &mut TcpStream, rely_server: SocketAddr) {
-        println!("try to reconnect!!!!");
-        match TcpStream::connect(rely_server.clone()).await {
-            Ok(new_stream) => {
-                *stream = new_stream;
-            }
-            Err(e) => {
-                panic!("cannot connection {e:?}");
-            }
-        };
+    async fn reconnect(stream: &mut TcpStream, rely_server: SocketAddr,times:i32) {
+		let mut times = times;
+		while times >0{
+			println!("try to reconnect!!!!");
+			match TcpStream::connect(rely_server.clone()).await {
+				Ok(new_stream) => {
+					*stream = new_stream;
+				}
+				Err(e) => {
+					panic!("cannot connection {e:?}");
+				}
+			};
+			times-=1;
+		}
     }
 
     loop {
@@ -298,7 +336,7 @@ async fn main() {
             pkt = framed.next() =>{
                 //let time = chrono::Local::now().timestamp_millis();
                 //println!("read packet from tun     {time}");
-                parse_tun_packet(pkt,& mut framed, & mut stream).await;
+                parse_tun_packet(pkt,& mut framed, & mut stream,current_vir_ip.clone()).await;
             }
             size = read_data_len(& mut stream) =>{
                 // let time = chrono::Local::now().timestamp_millis();
@@ -308,15 +346,15 @@ async fn main() {
                         match read_body(size,& mut stream).await{
                             Some(buf)=>{
                                 //framed.send(packet).await.unwrap();
-                                parse_socket_packet(TunPacket::new(buf),& mut framed,& mut stream).await;
+                                parse_socket_packet(TunPacket::new(buf),& mut framed,& mut stream,current_vir_ip.clone()).await;
                             }
                             None=>{
-                                reconnect(& mut stream,rely_server.clone()).await;
+                                reconnect(& mut stream,rely_server.clone(),config_file.try_times).await;
                             }
                         }
                     }
                     None=>{
-                        reconnect(& mut stream,rely_server.clone()).await;
+                        reconnect(& mut stream,rely_server.clone(),config_file.try_times).await;
                     }
                 }
             }
