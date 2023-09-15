@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 tokio = {version="1.23.0",features = ["macros","rt-multi-thread","net","io-util","time"]}
-tun = { version = "0.5.4", features = ["async"] }
+tun = { git="https://github.com/xmh0511/rust-tun.git", features = ["async"] }
 packet = "0.1.4"
 futures = "0.3.25"
 tokio-util = {version = "0.7.4",features=["codec"]}
