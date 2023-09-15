@@ -14,3 +14,12 @@ tokio-util = {version = "0.7.4",features=["codec"]}
 chrono = "0.4.30"
 config-file = "0.2.3"
 serde = {version = "1.0.188",features = ["serde_derive"]}
+md5 = "0.7.0"
+
+[dependencies.uuid]
+version = "1.4.1"
+features = [
+    "v4",                # Lets you generate random UUIDs
+    "fast-rng",          # Use a faster (but still sufficiently random) RNG
+    "macro-diagnostics", # Enable better diagnostics for compile-time UUIDs
+]

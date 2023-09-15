@@ -214,6 +214,12 @@ async fn main() {
     let rely_server: SocketAddr = config_file.rely.parse().unwrap();
     let current_vir_ip: Ipv4Addr = config_file.vir_addr.parse().unwrap();
 
+	let unique_identifier = format!("{:x}",md5::compute(uuid::Uuid::new_v4().to_string()));
+	if unique_identifier.len() !=32{
+		panic!("invalid identifier, whose len is not 32");
+	}
+	println!("your identifier is {unique_identifier}");
+
     let mut config = Configuration::default();
 
     config
@@ -248,7 +254,8 @@ async fn main() {
     let mut framed = dev.into_framed();
 
     let mut stream = match TcpStream::connect(rely_server.clone()).await {
-        Ok(stream) => {
+        Ok(mut stream) => {
+			stream.write_all(unique_identifier.as_bytes()).await.unwrap();
             stream
             // let mut buff = Vec::new();
             // let len = 20u16;
@@ -315,22 +322,24 @@ async fn main() {
         }
     }
 
-    async fn reconnect(stream: &mut TcpStream, rely_server: SocketAddr,times:i32) {
-		let mut times = times;
-		while times >0{
+    async fn reconnect(stream: &mut TcpStream, rely_server: SocketAddr,times:& mut i32,unique_identifier:String) {
+		while *times >0{
 			println!("try to reconnect!!!!");
 			match TcpStream::connect(rely_server.clone()).await {
-				Ok(new_stream) => {
+				Ok(mut new_stream) => {
+					new_stream.write_all(unique_identifier.as_bytes()).await.unwrap();
 					*stream = new_stream;
 				}
 				Err(e) => {
-					panic!("cannot connection {e:?}");
+					println!("reconnect fail due to {e:?}");
+					std::thread::sleep(std::time::Duration::from_secs(5));
+					continue;
 				}
 			};
-			times-=1;
+			*times-=1;
 		}
     }
-
+    let mut re_connect_times = config_file.try_times;
     loop {
         tokio::select! {
             pkt = framed.next() =>{
@@ -349,12 +358,12 @@ async fn main() {
                                 parse_socket_packet(TunPacket::new(buf),& mut framed,& mut stream,current_vir_ip.clone()).await;
                             }
                             None=>{
-                                reconnect(& mut stream,rely_server.clone(),config_file.try_times).await;
+                                reconnect(& mut stream,rely_server.clone(),& mut re_connect_times,unique_identifier.clone()).await;
                             }
                         }
                     }
                     None=>{
-                        reconnect(& mut stream,rely_server.clone(),config_file.try_times).await;
+                        reconnect(& mut stream,rely_server.clone(),& mut re_connect_times,unique_identifier.clone()).await;
                     }
                 }
             }
