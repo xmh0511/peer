@@ -2,3 +2,4 @@ rely = "192.168.1.11:3000"
 vir_addr = "10.0.0.2"
 route = "10.0.0.0/24"
 try_times = 10
+identifier = "96c9e0e6d08b243dd829d6858a6c0d41"

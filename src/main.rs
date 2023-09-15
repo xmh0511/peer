@@ -204,7 +204,8 @@ struct Config {
     rely: String,
     vir_addr: String,
     route: String,
-	try_times:i32
+	try_times:i32,
+	identifier:String
 }
 
 #[tokio::main]
@@ -214,7 +215,7 @@ async fn main() {
     let rely_server: SocketAddr = config_file.rely.parse().unwrap();
     let current_vir_ip: Ipv4Addr = config_file.vir_addr.parse().unwrap();
 
-	let unique_identifier = format!("{:x}",md5::compute(uuid::Uuid::new_v4().to_string()));
+	let unique_identifier = config_file.identifier;
 	if unique_identifier.len() !=32{
 		panic!("invalid identifier, whose len is not 32");
 	}
