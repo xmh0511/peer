@@ -1,11 +1,9 @@
-use std::{fmt::Debug, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use config_file::FromConfigFile;
 use futures::{SinkExt, StreamExt};
 use futures_util::stream::SplitSink;
-use futures_util::StreamExt as FStreamExt;
 use packet::{builder::Builder, icmp, ip, ip::Protocol, Packet};
-use std::io::Error;
 use std::net::Ipv4Addr;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
