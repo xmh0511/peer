@@ -389,6 +389,7 @@ dependencies = [
  "chrono",
  "config-file",
  "futures",
+ "futures-util",
  "md5",
  "packet",
  "serde",
