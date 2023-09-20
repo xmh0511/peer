@@ -14,7 +14,30 @@ use tun::{AsyncDevice, Configuration, TunPacket, TunPacketCodec};
 
 use tokio::sync::Mutex;
 
-async fn write_packet_to_socket(packet: TunPacket, stream: &OwnedWriteHalf) {
+use packet::Error as PktError;
+use std::io::Error as StdError;
+
+enum Error {
+    Packet(PktError),
+    IO(StdError),
+    Network(StdError),
+}
+
+impl From<PktError> for Error {
+    fn from(value: PktError) -> Self {
+        Error::Packet(value)
+    }
+}
+
+impl From<StdError> for Error {
+    fn from(value: StdError) -> Self {
+        Error::IO(value)
+    }
+}
+
+//struct Reconnection;
+
+async fn write_packet_to_socket(packet: TunPacket, stream: &OwnedWriteHalf) -> Result<(), Error> {
     let buff = packet.get_bytes();
     let len = buff.len() as u16;
     let bytes = len.to_be_bytes();
@@ -29,28 +52,51 @@ async fn write_packet_to_socket(packet: TunPacket, stream: &OwnedWriteHalf) {
             Ok(size) => {
                 if size == 0 {
                     //todo
-                    break;
+                    return Err(Error::Network(StdError::new(
+                        std::io::ErrorKind::NotConnected,
+                        "",
+                    )));
                 }
                 write_size += size;
                 if write_size == total_size {
                     break;
                 }
             }
-            Err(_) => {
-                break;
+            Err(e) => {
+                return Err(Error::Network(e));
             }
         }
     }
+    Ok(())
+}
+
+fn build_icmp_reply_packet<T: AsRef<[u8]>, U: AsRef<[u8]>>(
+    pkt: &ip::v4::Packet<T>,
+    icmp: &icmp::echo::Packet<U>,
+) -> Result<Vec<u8>, Error> {
+    Ok(ip::v4::Builder::default()
+        .id(0x42)?
+        .ttl(64)?
+        .source(pkt.destination())?
+        .destination(pkt.source())?
+        .icmp()?
+        .echo()?
+        .reply()?
+        .identifier(icmp.identifier())?
+        .sequence(icmp.sequence())?
+        .payload(icmp.payload())?
+        .build()?)
 }
 
 type TunHalfWriter = SplitSink<Framed<AsyncDevice, TunPacketCodec>, TunPacket>;
+
 async fn parse_tun_packet(
     raw_pkt: TunPacket,
     framed: &mut TunHalfWriter,
     stream: &OwnedWriteHalf,
     current_ip: Ipv4Addr,
-) {
-    match ip::Packet::new(raw_pkt.get_bytes()) {
+) -> Result<(), Error> {
+    return match ip::Packet::new(raw_pkt.get_bytes()) {
         Ok(ip::Packet::V4(pkt)) => {
             //println!("");
             // IP V4 packet
@@ -62,41 +108,18 @@ async fn parse_tun_packet(
                             Ok(icmp) => {
                                 if pkt.destination() == current_ip {
                                     //target myself
-                                    let reply = ip::v4::Builder::default()
-                                        .id(0x42)
-                                        .unwrap()
-                                        .ttl(64)
-                                        .unwrap()
-                                        .source(pkt.destination())
-                                        .unwrap()
-                                        .destination(pkt.source())
-                                        .unwrap()
-                                        .icmp()
-                                        .unwrap()
-                                        .echo()
-                                        .unwrap()
-                                        .reply()
-                                        .unwrap()
-                                        .identifier(icmp.identifier())
-                                        .unwrap()
-                                        .sequence(icmp.sequence())
-                                        .unwrap()
-                                        .payload(icmp.payload())
-                                        .unwrap()
-                                        .build()
-                                        .unwrap();
+                                    let reply = build_icmp_reply_packet(&pkt, &icmp)?;
                                     //tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                                     //framed.next().await;
                                     //println!("reply to {}",icmp.sequence());
-                                    framed.send(TunPacket::new(reply)).await.unwrap();
+                                    framed.send(TunPacket::new(reply)).await?;
                                 } else {
                                     write_packet_to_socket(
                                         TunPacket::new(raw_pkt.get_bytes().to_owned()),
                                         stream,
                                     )
-                                    .await;
+                                    .await?;
                                 }
-                                return;
                             }
                             _ => {
                                 // println!("icmp packet from tun but not echo");
@@ -111,19 +134,22 @@ async fn parse_tun_packet(
                 // maybe TCP, UDP or other packets
                 if pkt.destination() == current_ip {
                     //target myself
-                    framed.send(raw_pkt).await.unwrap();
+                    framed.send(raw_pkt).await?;
                 } else {
-                    write_packet_to_socket(raw_pkt, stream).await;
+                    write_packet_to_socket(raw_pkt, stream).await?;
                 }
             }
+            Ok(())
         }
         Err(err) => {
             println!("Received an invalid packet: {:?}", err);
+            Err(err.into())
         }
         _ => {
             println!("non-ip-v4 packet!!!!!");
+            Ok(())
         }
-    }
+    };
 }
 
 async fn parse_socket_packet(
@@ -131,8 +157,8 @@ async fn parse_socket_packet(
     framed: &mut TunHalfWriter,
     stream: &OwnedWriteHalf,
     current_ip: Ipv4Addr,
-) {
-    match ip::Packet::new(raw_pkt.get_bytes()) {
+) -> Result<(), Error> {
+    return match ip::Packet::new(raw_pkt.get_bytes()) {
         Ok(ip::Packet::V4(pkt)) => {
             //println!("ip v4 packet from socket");
             // IP V4 packet
@@ -146,38 +172,15 @@ async fn parse_socket_packet(
                                 if pkt.destination() == current_ip {
                                     //target myself
                                     if icmp.is_request() {
-                                        let reply = ip::v4::Builder::default()
-                                            .id(0x42)
-                                            .unwrap()
-                                            .ttl(64)
-                                            .unwrap()
-                                            .source(pkt.destination())
-                                            .unwrap()
-                                            .destination(pkt.source())
-                                            .unwrap()
-                                            .icmp()
-                                            .unwrap()
-                                            .echo()
-                                            .unwrap()
-                                            .reply()
-                                            .unwrap()
-                                            .identifier(icmp.identifier())
-                                            .unwrap()
-                                            .sequence(icmp.sequence())
-                                            .unwrap()
-                                            .payload(icmp.payload())
-                                            .unwrap()
-                                            .build()
-                                            .unwrap();
-                                        write_packet_to_socket(TunPacket::new(reply), stream).await;
+                                        let reply = build_icmp_reply_packet(&pkt, &icmp)?;
+                                        write_packet_to_socket(TunPacket::new(reply), stream)
+                                            .await?;
                                     } else if icmp.is_reply() {
                                         framed
                                             .send(TunPacket::new(raw_pkt.get_bytes().to_owned()))
-                                            .await
-                                            .unwrap();
+                                            .await?;
                                     }
                                 }
-                                return;
                             }
                             _ => {
                                 // println!("icmp packet but not icmp echo");
@@ -193,15 +196,18 @@ async fn parse_socket_packet(
                 //println!("tcp packet from socket!!!!!");
                 if pkt.destination() == current_ip {
                     //target myself
-                    framed.send(raw_pkt).await.unwrap();
+                    framed.send(raw_pkt).await?;
                 }
             }
+            Ok(())
         }
         Err(err) => {
             println!("Received an invalid packet: {:?}", err);
+            Err(err.into())
         }
         _ => {
             println!("non-ip-v4 packet!!!!!");
+            Ok(())
         }
     };
 }
@@ -277,7 +283,7 @@ async fn main() {
             stream
                 .write_all(unique_identifier.as_bytes())
                 .await
-                .unwrap();
+                .unwrap(); // must panic
             stream
         }
         Err(e) => {
@@ -344,11 +350,12 @@ async fn main() {
     // ) -> TcpStream {
     // }
 
-
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (tun_writer, mut tun_reader) = framed.split();
 
-    let write_taks = tokio::spawn(async move {
+	//let (request_reconn, mut rx_reconn) =  tokio::sync::mpsc::unbounded_channel();
+
+    let write_task = tokio::spawn(async move {
         let mut socket_handler: Option<Arc<OwnedWriteHalf>> = None;
         let tun_writer = Arc::new(Mutex::new(tun_writer));
         loop {
@@ -357,32 +364,45 @@ async fn main() {
                     Some(socket) => {
                         let tun_writer = Arc::clone(&tun_writer);
                         let socket = Arc::clone(socket);
+						//let request_reconn = request_reconn.clone();
                         tokio::spawn(async move {
                             let mut tun_writer = tun_writer.lock().await;
-                            parse_tun_packet(
+                            match parse_tun_packet(
                                 packet,
                                 &mut tun_writer,
                                 &socket,
                                 current_vir_ip.clone(),
                             )
-                            .await;
+                            .await{
+								Err(Error::Network(_))=>{
+									//let _ = request_reconn.send(Reconnection);
+								}
+								_=>{}
+							};
                         });
                     }
-                    None => {}
+                    None => {
+					}
                 },
                 Some(Message::DataFromSocket(packet)) => match &socket_handler {
                     Some(socket) => {
                         let tun_writer = Arc::clone(&tun_writer);
                         let socket = Arc::clone(socket);
+						//let request_reconn = request_reconn.clone();
                         tokio::spawn(async move {
                             let mut tun_writer = tun_writer.lock().await;
-                            parse_socket_packet(
+                            match parse_socket_packet(
                                 packet,
                                 &mut tun_writer,
                                 &socket,
                                 current_vir_ip.clone(),
                             )
-                            .await;
+                            .await{
+								Err(Error::Network(_))=>{
+									//let _ = request_reconn.send(Reconnection);
+								}
+								_=>{}
+							}
                         });
                     }
                     None => {}
@@ -421,7 +441,7 @@ async fn main() {
                         new_stream
                             .write_all(unique_identifier.as_bytes())
                             .await
-                            .unwrap();
+                            .unwrap(); // must panic
                         let (socket_reader, socket_writer) = new_stream.into_split();
                         return (socket_reader, socket_writer);
                     }
@@ -463,7 +483,7 @@ async fn main() {
     });
 
     socket_read_task.await.unwrap();
-    write_taks.await.unwrap();
+    write_task.await.unwrap();
     tun_read_task.await.unwrap();
 
     // loop {
